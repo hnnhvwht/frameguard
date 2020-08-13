@@ -1,0 +1,85 @@
+version: 2.1
+jobs:
+  build-test:
+    working_directory: ~/frameguard
+    docker:
+    - image: circleci/python:latest
+    steps:
+    - checkout
+    - restore_cache:
+        keys:
+        - pip-{{ checksum "requirements.txt" }}
+    - run:
+        name: Install dependencies to virtual environment
+        command: |
+          if true; then
+            python3 -m venv venv
+            . venv/bin/activate
+            pip install -r requirements.txt
+            pip install pytest
+          fi
+    - save_cache:
+        key: pip-{{ checksum "requirements.txt" }}
+        paths:
+        - "venv"
+    - run:
+        name: Test build
+        command: |
+          . venv/bin/activate
+          mkdir test-results
+          pytest --junitxml=test-results/junit.xml
+    - store_test_results:
+        path: test-results
+    - store_artifacts:
+        path: test-results
+  merge-to-master:
+    working_directory: ~/frameguard
+    docker:
+    - image: circleci/python:latest
+    steps:
+    - checkout
+    - run:
+        name: Merge dev branch into master
+        command: |
+          git checkout master
+          git merge --no-ff dev
+          git push -u origin master
+  make-upload-package:
+    working_directory: ~/frameguard
+    docker:
+    - image: circleci/python:latest
+    steps:
+    - checkout
+    - run:
+        name: Install dependencies to virtual environment
+        command: |
+          if true; then
+            python3 -m venv venv
+            . venv/bin/activate
+            pip install twine
+          fi
+    - run:
+        name: Make and upload package to PyPI
+        command: |
+          python setup.py sdist bdist_wheel
+          . venv/bin/activate
+          twine upload -u hnnhvwht -p $PYPI_PASSWORD ./dist/*
+    - store_artifacts:
+        path: ./dist
+workflows:
+  version: 2
+  main:
+    jobs:
+      - build-test
+      - merge-to-master:
+          filters:
+            branches:
+              only: dev
+          requires:
+            - build-test
+      - make-upload-package:
+          filters:
+            branches:
+              only: master
+          requires:
+            - build-test
