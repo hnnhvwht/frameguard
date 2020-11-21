@@ -50,22 +50,21 @@ fg = FrameGuard(df, auto_detect=True, categories=["species"])
 Building schema...
 =============================================================================
 Schema for feature 'sepal length (cm)':
-{'d_type': 'float64', 'allow_null': False}
+{'data_type': 'float64', 'allow_null': False}
 =============================================================================
 Schema for feature 'sepal width (cm)':
-{'d_type': 'float64', 'allow_null': False}
+{'data_type': 'float64', 'allow_null': False}
 =============================================================================
 Schema for feature 'petal length (cm)':
-{'d_type': 'float64', 'allow_null': False}
+{'data_type': 'float64', 'allow_null': False}
 =============================================================================
 Schema for feature 'petal width (cm)':
-{'d_type': 'float64', 'allow_null': False}
+{'data_type': 'float64', 'allow_null': False}
 =============================================================================
 Schema for feature 'species':
-{'d_type': 'int64', 'levels': array([0, 1, 2]), 'allow_null': False}
+{'data_type': 'int32', 'levels': array([0, 1, 2]), 'allow_null': False}
 =============================================================================
 Done! Created constraints for 5 features.
-
 ```
 
 We instructed FrameGuard to generate the schema automatically, indicating that the `"species"` column represents a categorical variable.
@@ -85,61 +84,61 @@ fg.append(batch)
 
 ```
 ---------------------------------------------------------------------------
-...
-AssertionError: Unexpected level in categorical feature 'species'.
+[...]
+ValidationError: Incorrect type for 'species' in batch.
 
 During handling of the above exception, another exception occurred:
-...
-FrameGuardError: Batch does not satisfy schema. Cancelling operation...
+[...]
+FrameGuardError: Batch does not satisfy schema. Operation cancelled...
 ```
 
 Thus, the integrity of the underlying DataFrame is assured.
 
-Presently, automatic schema detection is perhaps too simple for most real-world use cases. FrameGuard allows you to add and update schema manually:
+Presently, automatic schema detection is perhaps too simple for most real-world use cases. FrameGuard allows you to add and update constraints manually:
 
 ```python
 fg = FrameGuard(df)
-fg.update_schema(
+fg.add_constraint(
     features=[
       "sepal length (cm)",
       "sepal width (cm)",
       "petal length (cm)",
       "petal width (cm)"
     ],
-    d_type="float64",
+    data_type="float64",
     allow_null=False
 )
-fg.update_schema(
+fg.add_constraint(
     features=["species"],
-    d_type="int64",
+    data_type="int32",
     levels=[0, 1, 2],
     allow_null=False
 )
 ```
 
-Modifications to schema will not be accepted if they do not match the data:
+Modifications to schemata will not be accepted if they do not match the data:
 
 ```python
-fg.update_schema(
+fg.add_constraint(
     features=["species"],
-    d_type="str",
+    data_type="str",
     levels=["setosa", "versicolor", "virginica"],
     allow_null=False
 )
 ```
 
 ```
-FrameGuardWarning: Type mismatch for 'species'. Skipping...
+SchemaWarning: Type mismatch for 'species'. Skipping...
 ```
 
 When we're satisfied, we can export our schema in JSON or YAML form. By default, schema are exported to the current working directory in YAML format:
 
 ```python
-fg.save_schema()
+fg.export_schema()
 ```
 
 ```
-Schema exported successfully to schema-2020-08-13-113101.yaml.
+Schema exported successfully to schema-2020-11-21-162209.yml.
 ```
 
 This is what the output looks like:
@@ -148,19 +147,19 @@ This is what the output looks like:
 features:
   petal length (cm):
     allow_null: false
-    d_type: float64
+    data_type: float64
   petal width (cm):
     allow_null: false
-    d_type: float64
+    data_type: float64
   sepal length (cm):
     allow_null: false
-    d_type: float64
+    data_type: float64
   sepal width (cm):
     allow_null: false
-    d_type: float64
+    data_type: float64
   species:
     allow_null: false
-    d_type: int64
+    data_type: int32
     levels:
     - 0
     - 1
@@ -171,7 +170,7 @@ Just as well, we may import a schema after initialization. The DataFrame will be
 
 ```python
 fg = FrameGuard(df)
-fg.load_schema("schema-2020-08-13-113101.yaml")
+fg.import_schema("schema-2020-11-21-162209.yml")
 ```
 
 ```
@@ -201,12 +200,14 @@ Checking feature 'species'...
 Done validating DataFrame. Found 0 integrity violation(s).
 ```
 
+Alternatively, if you have a schema in the form of a mapping, YAML or JSON object in memory, you could load it using the `load_schema()` method.
+
 ### Constraints
 
 Presently, the following constraints are supported:
-- `"d_type"` &ndash; the data type (NumPy types only);
-- `"minimum"` &ndash; the minimum value for numerical features;
-- `"maximum"` &ndash; the maximum value for numerical features;
+- `"data_type"` &ndash; the data type (NumPy types only);
+- `"min"` &ndash; the minimum value for numerical features;
+- `"max"` &ndash; the maximum value for numerical features;
 - `"levels"` &ndash; the allowed levels for categorical features;
 - `"pattern"` &ndash; a pattern for matching regular expressions;
 - `"all_unique"` &ndash; whether duplicated values are permitted; and
@@ -214,26 +215,10 @@ Presently, the following constraints are supported:
 
 ## Planned Updates
 
-Presently, FrameGuard uses a composition approach&mdash;that is, the `FrameGuard` class is a wrapper around the `pandas.DataFrame` class. Emphasis is placed on data integrity and only append/remove operations are permitted. But what if you want to perform arbitrary transformations on your DataFrame while preserving the integrity of the data? This is where an inheritance approach would be useful:
-
-```python
-import pandas as pd
-
-class GuardedDataFrame(pd.DataFrame):
-    _metadata = ["schema"]
-    ...
-```
-
-This extension is currently in the works.
-
-In addition, I would like to:
-
-- write more tests and complete documentation;
-- improve automatic detection of schema;
-- add support for datetime detection and formatting; and
-- add support for conformity of numeric features to statistical distributions.
-
-Other suggestions are welcome!
+- Write more tests and complete documentation
+- Improve automatic detection of schema
+- Add support for datetime detection and formatting
+- Add support for conformity of numeric features to statistical distributions
 
 ## Authors
 
