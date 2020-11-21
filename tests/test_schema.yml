@@ -1,0 +1,22 @@
+features:
+  power:
+    data_type: int64
+    all_unique: true
+    allow_null: false
+  energy:
+    data_type: float64
+    min: 0
+    max: 1
+    allow_null: false
+  ice:
+    data_type: object
+    levels:
+      - alpha
+      - beta
+      - gamma
+      - zeta
+    allow_null: false
+  plasma:
+    data_type: object
+    pattern: \w{4}-\w{4}
+    allow_null: false

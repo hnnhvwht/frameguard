@@ -1,10 +1,12 @@
 from datetime import datetime
+import collections
 import json
-import numpy as np
-import pandas as pd
 import pathlib
 import re
 import warnings
+
+import numpy as np
+import pandas as pd
 import yaml
 
 
@@ -12,7 +14,11 @@ class FrameGuardError(Exception):
     pass
 
 
-class FrameGuardWarning(UserWarning):
+class ValidationError(FrameGuardError):
+    pass
+
+
+class SchemaWarning(UserWarning):
     pass
 
 
@@ -33,6 +39,9 @@ class FrameGuard:
     self._df : pandas.DataFrame
     self._schema : dict
     """
+    _constraint_types = ("data_type", "min", "max", "levels", "pattern", 
+        "all_unique", "allow_null")
+
     def __init__(self, df, schema=None, auto_detect=False, categories=None):
         self._df = df
         if schema is not None:
@@ -44,16 +53,6 @@ class FrameGuard:
             self._schema = dict()
             self._schema["features"] = dict()
 
-    @staticmethod
-    def _check_features(features):
-        """
-        Check whether the features argument to `self.update_schema` is an
-        iterable that is not a dictionary or string.
-        """
-        if (hasattr(type(features), "__len__") and
-                not isinstance(features, (dict, str))):
-            return True
-
     def _detect_schema(self, categories):
         print("Building schema...")
         print(77 * "=")
@@ -63,7 +62,7 @@ class FrameGuard:
             if feature not in self._schema["features"].keys():
                 self._schema["features"][feature] = dict()
             spec = self._schema["features"][feature]
-            spec["d_type"] = str(self._df[feature].dtype)
+            spec["data_type"] = str(self._df[feature].dtype)
             if hasattr(self._df[feature], "cat"):
                 spec["levels"] = self._df[feature].unique()
             elif categories is not None and feature in categories:
@@ -78,64 +77,86 @@ class FrameGuard:
     def _validate_batch(self, batch):
         for feature in self._df.columns:
             spec = self._schema["features"][feature]
-            assert batch[feature].dtype == np.dtype(spec["d_type"]), (
-                f"Incorrect type for '{feature}' in batch."
-            )
-
-            if "minimum" in spec.keys():
-                assert all(batch[feature] >= spec["minimum"]), (
-                    f"At least one value is smaller than the allowed minimum "
-                    f"for '{feature}'."
+            if not batch[feature].dtype == np.dtype(spec["data_type"]):
+                raise ValidationError(
+                    f"Incorrect type for '{feature}' in batch."
                 )
 
-            if "maximum" in spec.keys():
-                assert all(batch[feature] <= spec["maximum"]), (
-                    f"At least one value is greater than the allowed maximum "
-                    f"for '{feature}'."
-                )
+            if "min" in spec.keys():
+                if not all(batch[feature] >= spec["min"]):
+                    raise ValidationError(
+                        f"At least one value is smaller than the allowed "
+                        f"min for '{feature}'."
+                    )
+
+            if "max" in spec.keys():
+                if not all(batch[feature] <= spec["max"]):
+                    raise ValidationError(
+                        f"At least one value is greater than the allowed "
+                        f"max for '{feature}'."
+                    )
 
             if "levels" in spec.keys():
-                assert all(batch[feature].apply(
+                if not all(batch[feature].apply(
                     lambda x: x in spec["levels"])
-                ), f"Unexpected level in categorical feature '{feature}'."
+                ):
+                    raise ValidationError(
+                        f"Unexpected level in categorical feature '{feature}'."
+                    )
 
             if "pattern" in spec.keys():
                 regex = re.compile(spec["pattern"])
-                assert all(batch[feature].apply(
+                if not all(batch[feature].apply(
                     lambda x: regex.fullmatch(x))
-                ), f"Can't match pattern to '{feature}' in batch."
+                ):
+                    raise ValidationError(
+                        f"Can't match pattern to '{feature}' in batch."
+                    )
 
             if "all_unique" in spec.keys() and spec["all_unique"]:
                 result = pd.concat([self._df[feature], batch[feature]])
-                assert not any(result.duplicated()), (
-                    f"Duplicate value(s) detected in unique feature "
-                    f"'{feature}'."
+                if any(result.duplicated()):
+                    raise ValidationError(
+                        f"Duplicate value(s) detected in unique feature "
+                        f"'{feature}'."
                 )
 
             if "allow_null" in spec.keys() and not spec["allow_null"]:
-                assert not any(batch[feature].isna()), (
-                    f"Null value(s) detected in non-null feature '{feature}'."
+                if any(batch[feature].isna()):
+                    raise ValidationError(
+                        f"Null value(s) detected in non-null feature "
+                        f"'{feature}'."
                 )
 
-    def update_schema(
-        self, features, documentation=None, d_type="auto",
-        minimum=None, maximum=None, levels=None,
+    @staticmethod
+    def _validate_resources(schema):
+        if "features" not in schema.keys():
+            raise FrameGuardError("Failed to find features resource.")
+
+        for feature in schema["features"].keys():
+            for constraint in schema["features"][feature]:
+                if constraint not in FrameGuard._constraint_types:
+                    raise FrameGuardError(
+                        f"Bad schema: {constraint} is not a valid "
+                        f"FrameGuard constraint."
+                    )
+
+    def add_constraint(
+        self, features, data_type="auto", min=None, max=None, levels=None,
         pattern=None, all_unique=False, allow_null=False
     ):
         r"""
-        Add constraints on one or more features.
+        Add constraint on one or more features.
 
         Parameters
         ----------
         features : array_like
             Feature(s) for which to create constraints
-        documentation : str, optional, default: None
-            Feature documentation
-        d_type : str {"auto"} or numpy.dtype, optional, default: "auto"
+        data_type : str {"auto"} or numpy.dtype, optional, default: "auto"
             NumPy type that the feature should have
-        minimum : numeric, optional, default: None
+        min : numeric, optional, default: None
             Minimum value (lower bound) for numeric features
-        maximum : numeric, optional, default: None
+        max : numeric, optional, default: None
             Maximum value (upper bound) for numeric features
         levels : array_like, optional, default: None
             Permitted levels for a categorical feature
@@ -147,20 +168,19 @@ class FrameGuard:
         allow_null : bool, optional, default: False
             Whether NA values are permitted
         """
-        if not FrameGuard._check_features(features):
+        if not isinstance(features, collections.abc.Sequence):
             raise FrameGuardError(
                 f"Passed feature(s) are not properly formed. "
                 f"A {type(features)} was passed. "
-                f"Please pass a list, tuple, set, numpy.ndarray, ..."
+                f"Please pass a sequence of features."
             )
 
         for feature in features:
-            try:
-                assert feature in self._df.columns
-            except AssertionError:
+            if feature not in self._df.columns:
                 warnings.warn(
-                    f"Feature '{feature}' not found in DataFrame. Skipping...",
-                    FrameGuardWarning
+                    f"Feature '{feature}' not found in DataFrame. "
+                    f"Skipping...",
+                    SchemaWarning
                 )
                 continue
 
@@ -169,103 +189,85 @@ class FrameGuard:
 
             spec = self._schema["features"][feature]
 
-            if documentation is not None:
-                spec["documentation"] = documentation
-
-            if d_type == "auto":
-                spec["d_type"] = str(self._df[feature].dtype)
+            if data_type == "auto":
+                spec["data_type"] = str(self._df[feature].dtype)
             else:
-                if isinstance(d_type, str):
+                if isinstance(data_type, str):
                     try:
-                        _ = np.dtype(d_type)
+                        _ = np.dtype(data_type)
                     except TypeError:
                         warnings.warn(
                             f"Failed to parse type for '{feature}'. "
                             f"Skipping...",
-                            FrameGuardWarning
+                            SchemaWarning
                         )
                         continue
-                if isinstance(d_type, np.dtype):
-                    d_type = str(d_type)
-                try:
-                    assert np.dtype(d_type) == self._df[feature].dtype
-                except AssertionError:
+                if isinstance(data_type, np.dtype):
+                    data_type = str(data_type)
+                if not np.dtype(data_type) == self._df[feature].dtype:
                     warnings.warn(
                         f"Type mismatch for '{feature}'. Skipping...",
-                        FrameGuardWarning
+                        SchemaWarning
                     )
                     continue
-                spec["d_type"] = d_type
+                spec["data_type"] = data_type
 
-            if minimum is not None:
-                try:
-                    assert pd.api.types.is_numeric_dtype(spec["d_type"])
-                except AssertionError:
+            if min is not None:
+                if not pd.api.types.is_numeric_dtype(spec["data_type"]):
                     warnings.warn(
                         f"Cannot impose minimum value on non-numeric feature "
                         f"'{feature}'. Skipping...",
-                        FrameGuardWarning
+                        SchemaWarning
                     )
                     continue
-                try:
-                    assert all(self._df[feature] >= minimum)
-                except AssertionError:
+                if not all(self._df[feature] >= min):
                     warnings.warn(
                         f"At least one value in '{feature}' is smaller than "
-                        f"the allowed minimum value of {minimum}. Skipping...",
-                        FrameGuardWarning
+                        f"the allowed minimum value of {min}. Skipping...",
+                        SchemaWarning
                     )
                     continue
-                spec["minimum"] = minimum
+                spec["min"] = min
 
-            if maximum is not None:
-                try:
-                    assert pd.api.types.is_numeric_dtype(spec["d_type"])
-                except AssertionError:
+            if max is not None:
+                if not pd.api.types.is_numeric_dtype(spec["data_type"]):
                     warnings.warn(
                         f"Cannot impose maximum value on non-numeric feature "
                         f"'{feature}'. Skipping...",
-                        FrameGuardWarning
+                        SchemaWarning
                     )
                     continue
-                try:
-                    assert all(self._df[feature] <= maximum)
-                except AssertionError:
+                if not all(self._df[feature] <= max):
                     warnings.warn(
                         f"At least one value in '{feature}' is greater than "
-                        f"the allowed maximum value of {maximum}. Skipping...",
-                        FrameGuardWarning
+                        f"the allowed maximum value of {max}. Skipping...",
+                        SchemaWarning
                     )
                     continue
-                if minimum is not None:
-                    try:
-                        assert minimum < maximum
-                    except AssertionError:
+                if min is not None:
+                    if not min < max:
                         warnings.warn(
-                            f"The minimum value for '{feature}' is not smaller "
-                            f"than the maximum value. Skipping...",
-                            FrameGuardWarning
+                            f"The minimum value for '{feature}' is not "
+                            f"smaller than the maximum value. Skipping...",
+                            SchemaWarning
                         )
                         continue
-                spec["maximum"] = maximum
+                spec["max"] = max
 
             if levels is not None:
-                try:
-                    assert spec["d_type"] in ("int64", "object", "str")
-                except AssertionError:
+                if (spec["data_type"] not in
+                    ("int32", "int64", "object", "str")):
                     warnings.warn(
-                        f"Cannot impose levels on non-string feature "
-                        f"'{feature}' of type {spec['d_type']}. Skipping...",
-                        FrameGuardWarning
+                        f"Cannot impose levels on feature '{feature}' of type "
+                        f"{spec['data_type']}. Skipping...",
+                        SchemaWarning
                     )
                     continue
-                try:
-                    assert all(self._df[feature].apply(lambda x: x in levels))
-                except AssertionError:
+                if not all(self._df[feature].apply(lambda x: x in levels)):
                     warnings.warn(
-                        f"Unexpected level in categorical feature '{feature}'. "
-                        f"Skipping...",
-                        FrameGuardWarning
+                        f"Unexpected level in categorical feature "
+                        f"'{feature}'. Skipping...",
+                        SchemaWarning
                     )
                     continue
                 if not isinstance(levels, list):
@@ -279,7 +281,7 @@ class FrameGuard:
                     warnings.warn(
                         f"Failed to compile regular expression for {feature}. "
                         f"Skipping...",
-                        FrameGuardWarning
+                        SchemaWarning
                     )
                     continue
                 try:
@@ -288,31 +290,27 @@ class FrameGuard:
                     warnings.warn(
                         f"Can't match pattern for incorrectly typed feature "
                         f"'{feature}'. Skipping...",
-                        FrameGuardWarning
+                        SchemaWarning
                     )
                     continue
                 spec["pattern"] = pattern
 
             if all_unique:
-                try:
-                    assert not any(self._df[feature].duplicated())
-                except AssertionError:
+                if any(self._df[feature].duplicated()):
                     warnings.warn(
                         f"Duplicate value(s) detected in unique feature "
                         f"'{feature}'. Skipping...",
-                        FrameGuardWarning
+                        SchemaWarning
                     )
                     continue
                 spec["all_unique"] = True
 
             if not allow_null:
-                try:
-                    assert not any(self._df[feature].isna())
-                except AssertionError:
+                if any(self._df[feature].isna()):
                     warnings.warn(
                         f"Null value(s) detected in non-null feature "
                         f"'{feature}'. Skipping...",
-                        FrameGuardWarning
+                        SchemaWarning
                     )
                     continue
                 spec["allow_null"] = False
@@ -321,8 +319,11 @@ class FrameGuard:
         """
         Check the DataFrame against the schema for integrity violations.
         """
-        assert hasattr(self, "_schema"), "No schema found."
-        assert len(self._schema["features"]) > 0, "The stored schema is empty!"
+        if not hasattr(self, "_schema"):
+            raise SchemaWarning("No schema found.")
+        
+        if not len(self._schema["features"]) > 0:
+            raise SchemaWarning("The stored schema is empty!")
 
         total_errors = 0
         print("Validating DataFrame...", end="\n\n")
@@ -331,36 +332,30 @@ class FrameGuard:
             print(f"Checking feature '{feature}'...")
             spec = self._schema["features"][feature]
 
-            try:
-                assert(self._df[feature].dtype == np.dtype(spec["d_type"]))
-            except AssertionError:
+            if not self._df[feature].dtype == np.dtype(spec["data_type"]):
                 print(
                     f"\tTYPE: Found {str(self._df[feature].dtype)}, "
-                    f"expected {spec['d_type']}"
+                    f"expected {spec['data_type']}"
                 )
                 feature_errors += 1
 
-            if "minimum" in spec.keys():
-                mask = self._df[feature] >= spec["minimum"]
-                try:
-                    assert all(mask)
-                except AssertionError:
+            if "min" in spec.keys():
+                mask = self._df[feature] >= spec["min"]
+                if not all(mask):
                     idx_str = str(self._df.loc[mask is False].index.values)
                     print(
                         f"\tMINIMUM: The value(s) at {idx_str} are smaller "
-                        f"than the allowed minimum, {spec['minimum']}."
+                        f"than the allowed minimum, {spec['min']}."
                     )
                     feature_errors += 1
 
-            if "maximum" in spec.keys():
-                mask = self._df[feature] <= spec["maximum"]
-                try:
-                    assert all(mask)
-                except AssertionError:
+            if "max" in spec.keys():
+                mask = self._df[feature] <= spec["max"]
+                if not all(mask):
                     idx_str = str(self._df.loc[mask is False].index.values)
                     print(
                         f"\tMAXIMUM: The value(s) at {idx_str} are greater "
-                        f"than the allowed maximum, {spec['maximum']}."
+                        f"than the allowed maximum, {spec['max']}."
                     )
                     feature_errors += 1
 
@@ -368,9 +363,7 @@ class FrameGuard:
                 mask = self._df[feature].apply(
                     lambda x: x in spec["levels"]
                 )
-                try:
-                    assert all(mask)
-                except AssertionError:
+                if not all(mask):
                     idx_str = str(self._df.loc[mask is False].index.values)
                     print(
                         f"\tLEVELS: Unexpected level(s) at indices {idx_str} "
@@ -383,9 +376,7 @@ class FrameGuard:
                 mask = self._df[feature].apply(
                     lambda x: isinstance(regex.fullmatch(x), re.Match)
                 )
-                try:
-                    assert all(mask)
-                except AssertionError:
+                if not all(mask):
                     idx_str = str(self._df.loc[mask is False].index.values)
                     print(
                         f"\tPATTERN: Pattern mismatch at {idx_str}."
@@ -394,10 +385,8 @@ class FrameGuard:
 
             if "all_unique" in spec.keys() and spec["all_unique"]:
                 mask = self._df[feature].duplicated()
-                try:
-                    assert not all(mask)
-                except AssertionError:
-                    idx_str = str(self._df.loc[mask is False].index.values)
+                if any(mask):
+                    idx_str = str(self._df.loc[mask is True].index.values)
                     print(
                         f"\tALL UNIQUE: Duplicated value(s) at {idx_str}."
                     )
@@ -405,9 +394,7 @@ class FrameGuard:
 
             if "allow_null" in spec.keys() and not spec["allow_null"]:
                 mask = self._df[feature].isna()
-                try:
-                    assert not all(mask)
-                except AssertionError:
+                if any(mask):
                     idx_str = str(self._df.loc[mask is True].index.values)
                     print(
                         f"\tALLOW NULL: Null value(s) at {idx_str}."
@@ -438,19 +425,23 @@ class FrameGuard:
         ----------
         batch : pandas.DataFrame
         """
-        assert isinstance(batch, pd.DataFrame), (
-            f"Expected Pandas DataFrame for append operation, "
-            f"got {type(batch)} instead."
-        )
         try:
             self._validate_batch(batch)
-        except AssertionError:
+        except ValidationError:
             raise FrameGuardError(
-                "Batch does not satisfy schema. Cancelling operation..."
+                "Batch does not satisfy schema. Operation cancelled..."
             )
-        self._df = pd.concat([self._df, batch], ignore_index=True)
-        print(f"Append operation successful."
-              f"Added {len(batch)} instances.")
+        try:
+            self._df = pd.concat([self._df, batch], ignore_index=True)
+        except TypeError:
+            raise FrameGuardError(
+                "Could not append batch due to a type mismatch. "
+                "Expected a Pandas DataFrame."
+        )
+        print(
+            f"Append operation successful. "
+            f"Added {len(batch)} instances."
+        )
 
     def remove(self, index, reset_index=False):
         """
@@ -467,15 +458,15 @@ class FrameGuard:
         if reset_index:
             self._df.reset_index(drop=True, inplace=True)
 
-    def save_schema(self, path="./", fmt="yaml"):
+    def export_schema(self, path="./", fmt="yml"):
         """
         Export the schema.
 
         Parameters
         ----------
-        path : str
+        path : str, optional, default: "./
             The directory to which to dump the schema
-        fmt : str {"yaml", "json"}, optional, default: "yaml"
+        fmt : str {"yml", "yaml", "json"}, optional, default: "yml"
             The desired schema format
         """
         p = pathlib.Path(path)
@@ -487,11 +478,39 @@ class FrameGuard:
         with fp.open("w") as stream:
             if fmt in ("yml", "yaml"):
                 yaml.dump(self._schema, stream)
-            if fmt == "json":
+            elif fmt == "json":
                 json.dump(self._schema, stream)
         print(f"Schema exported successfully to {fp}.")
 
-    def load_schema(self, path):
+    def load_schema(self, obj, validate=True):
+        """
+        Load a schema from a mapping or a JSON or YSML object.
+
+        Parameters
+        ----------
+        obj : mapping, str
+            The object to load as a schema
+        validate : bool, optional, default: True
+            Whether to validate the schema after importing it
+        """
+        try:
+            schema = yaml.safe_load(obj)
+        except AttributeError:
+            if isinstance(obj, collections.abc.Mapping):
+                schema = obj
+            else:
+                raise FrameGuardError(
+                    "Failed to parse object. "
+                    "Please provide a YAML or JSON object or a mapping."
+                )
+        
+        FrameGuard._validate_resources(schema)
+        self._schema = schema
+        print("Schema loaded successfully!")
+        if validate:
+            self.validate()
+
+    def import_schema(self, path, validate=True):
         """
         Import a schema in YAML or JSON form.
 
@@ -499,41 +518,25 @@ class FrameGuard:
         ----------
         path : str
             The file path from which to load the schema
+        validate : bool, optional, default: True
+            Whether to validate the schema after importing it
         """
         extension = path.split(".")[-1]
         if extension not in ("yml", "yaml", "json"):
             raise FrameGuardError("Unrecognized file extension.")
 
         p = pathlib.Path(path)
-        try:
-            assert p.exists()
-        except AssertionError:
+        if not p.exists():
             raise FrameGuardError("Cannot find file at given path.")
 
         with p.open() as stream:
             if extension in ("yml", "yaml"):
                 schema = yaml.safe_load(stream)
-            if extension == "json":
+            elif extension == "json":
                 schema = json.load(stream)
 
-            try:
-                assert "features" in schema.keys()
-            except AssertionError:
-                raise FrameGuardError("Failed to find features resource.")
-
-            for feature in schema["features"].keys():
-                for constraint in schema["features"][feature]:
-                    try:
-                        assert constraint in (
-                            "documentation", "d_type", "minimum", "maximum",
-                            "levels", "pattern", "all_unique", "allow_null"
-                        )
-                    except AssertionError:
-                        raise FrameGuardError(
-                            f"Bad schema: {constraint} is not a valid "
-                            f"FrameGuard constraint."
-                        )
-
+            FrameGuard._validate_resources(schema)
             self._schema = schema
             print("Schema loaded successfully!")
-            self.validate()
+            if validate:
+                self.validate()

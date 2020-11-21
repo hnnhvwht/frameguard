@@ -15,7 +15,7 @@ def generate_string():
 
 
 data = {
-    "power": np.arange(sz),
+    "power": np.arange(sz, dtype=np.int64),
     "energy": rg.random((sz,)),
     "ice": rg.choice(np.array(["alpha", "beta", "gamma", "zeta"]), (sz,)),
     "plasma": [generate_string() for i in range(sz)]
@@ -26,23 +26,23 @@ df = pd.DataFrame(data)
 test_schema = {
     "features": {
         "power": {
-            "d_type": "int64",
+            "data_type": "int64",
             "all_unique": True,
             "allow_null": False
         },
         "energy": {
-            "d_type": "float64",
-            "minimum": 0,
-            "maximum": 1,
+            "data_type": "float64",
+            "min": 0,
+            "max": 1,
             "allow_null": False
         },
         "ice": {
-            "d_type": "object",
+            "data_type": "object",
             "levels": ["alpha", "beta", "gamma", "zeta"],
             "allow_null": False
         },
         "plasma": {
-            "d_type": "object",
+            "data_type": "object",
             "pattern": r"\w{4}-\w{4}",
             "allow_null": False
         }
@@ -109,30 +109,45 @@ test_batch_7 = pd.DataFrame({
 def test_detect_schema():
     fg = FrameGuard(df, auto_detect=True)
     spec = fg._schema["features"]
-    assert spec["power"]["d_type"] == "int64"
-    assert spec["energy"]["d_type"] == "float64"
-    assert spec["ice"]["d_type"] == "object"
-    assert spec["plasma"]["d_type"] == "object"
+    assert spec["power"]["data_type"] == "int64"
+    assert spec["energy"]["data_type"] == "float64"
+    assert spec["ice"]["data_type"] == "object"
+    assert spec["plasma"]["data_type"] == "object"
 
 
-def test_update_schema():
+def test_add_constraint():
     fg = FrameGuard(df)
-    fg.update_schema(
-        ["power"], d_type="int64", all_unique=True, allow_null=False
+
+    fg.add_constraint(
+        ["power"],
+        data_type="int64",
+        all_unique=True,
+        allow_null=False
     )
-    fg.update_schema(
-        ["energy"], d_type="float64", minimum=0, maximum=1
+
+    fg.add_constraint(
+        ["energy"],
+        data_type="float64",
+        min=0,
+        max=1
     )
-    fg.update_schema(
-        ["ice"], d_type="object", levels=["alpha", "beta", "gamma", "zeta"]
+
+    fg.add_constraint(
+        ["ice"],
+        data_type="object",
+        levels=["alpha", "beta", "gamma", "zeta"]
     )
-    fg.update_schema(
-        ["plasma"], d_type="object", pattern=r"\w{4}-\w{4}"
+    
+    fg.add_constraint(
+        ["plasma"],
+        data_type="object",
+        pattern=r"\w{4}-\w{4}"
     )
+
     assert fg._schema == test_schema
 
 
-def test_append_remove():
+def test_append():
     fg = FrameGuard(df, schema=test_schema)
     fg.append(test_batch_0)
     assert len(fg._df) == 23
@@ -149,7 +164,22 @@ def test_append_remove():
         try:
             fg.append(batch)
         except FrameGuardError:
-            assert len(fg._df) == 23
+            continue
 
-    fg.remove([20, 21, 22], reset_index=True)
-    assert len(fg._df) == 20
+
+def test_remove():
+    fg = FrameGuard(df, schema=test_schema)
+    fg.remove([17, 18, 19], reset_index=True)
+    assert len(fg._df) == 17
+
+
+def test_load_schema():
+    fg = FrameGuard(df)
+    fg.load_schema(test_schema)
+    assert len(fg._schema["features"].keys()) == 4
+
+
+def test_import_schema():
+    fg = FrameGuard(df)
+    fg.import_schema("./tests/test_schema.yml")
+    assert len(fg._schema["features"].keys()) == 4
